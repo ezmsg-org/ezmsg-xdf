@@ -9,7 +9,9 @@ from ezmsg.lsl.util import AxisArray
 from frozendict import frozendict
 
 
-MultiStreamMessage = frozendict[str, typing.Union[AxisArray, tuple[AxisArray, ...]]]  # type alias
+MultiStreamMessage = frozendict[
+    str, typing.Union[AxisArray, tuple[AxisArray, ...]]
+]  # type alias
 
 
 class XDFIterator:
@@ -52,7 +54,9 @@ class XDFIterator:
         self._prev_file_read_s: float = (
             0  # File read header in seconds for previous iteration
         )
-        self._time_range: typing.Tuple[typing.Optional[float], typing.Optional[float]] = (start_time, stop_time)
+        self._time_range: typing.Tuple[
+            typing.Optional[float], typing.Optional[float]
+        ] = (start_time, stop_time)
         self._scan_file()
 
     def _scan_file(self):
@@ -206,7 +210,7 @@ class XDFAxisArrayIterator(XDFIterator):
                 "time": AxisArray.Axis.TimeAxis(fs=fs, offset=0.0),
                 "ch": AxisArray.Axis.SpaceAxis(labels=labels),
             },
-            key=self._streams[0]["info"]["name"][0]
+            key=self._streams[0]["info"]["name"][0],
         )
 
     def __next__(self) -> AxisArray:
@@ -252,7 +256,7 @@ class XDFMultiAxArrIterator(XDFIterator):
                     "time": AxisArray.Axis.TimeAxis(fs=fs or 1.0, offset=0.0),
                     "ch": AxisArray.Axis.SpaceAxis(labels=labels),
                 },
-                key=stream_name
+                key=stream_name,
             )
 
     def __next__(self) -> MultiStreamMessage:
