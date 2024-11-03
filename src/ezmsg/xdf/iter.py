@@ -48,8 +48,9 @@ class XDFIterator:
         self._chunk_dur = chunk_dur
         self._rezero = rezero
         self._n_chunks = 0
+        self._t0 = 0.0
         self._chunk_ix = 0
-        self._last_time = 0
+        self._last_time = 0.0
         self._metadata = {}
         self._prev_file_read_s: float = (
             0  # File read header in seconds for previous iteration
@@ -106,6 +107,8 @@ class XDFIterator:
         if self._rezero:
             for strm in self._streams:
                 strm["time_stamps"] = strm["time_stamps"] - xdf_t0
+            xdf_tmax -= xdf_t0
+            xdf_t0 = 0
 
         # Adjust for provided time bounds
         for strm in self._streams:
@@ -124,15 +127,14 @@ class XDFIterator:
         xdf_dur = 0
         for strm in self._streams:
             tvec = strm["time_stamps"]
+            srate = float(strm["info"]["nominal_srate"][0])
+            adj = (1/srate if srate > 0 else 0) - xdf_t0
             if len(tvec) > 0:
-                xdf_dur = max(xdf_dur, tvec[-1])
-        if not self._rezero:
-            xdf_dur -= xdf_t0
-        else:
-            xdf_t0 = 0
+                xdf_dur = max(xdf_dur, tvec[-1] + adj)
 
         # Chunking
         self._n_chunks = int(np.ceil(xdf_dur / self._chunk_dur))
+        self._t0 = xdf_t0
 
         # Drop streams that were not selected. (Could not drop earlier due to timestamp rezero)
         if self._rezero and self._select is not None:
@@ -163,8 +165,8 @@ class XDFIterator:
         else:
             out_dict = {}
             t_start, t_stop = (
-                self._chunk_ix * self._chunk_dur,
-                (self._chunk_ix + 1) * self._chunk_dur,
+                self._chunk_ix * self._chunk_dur + self._t0,
+                (self._chunk_ix + 1) * self._chunk_dur + self._t0,
             )
             for strm in self._streams:
                 b_chunk = np.logical_and(
