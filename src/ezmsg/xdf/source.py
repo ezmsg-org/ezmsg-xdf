@@ -17,7 +17,14 @@ class XDFIteratorSettings(ez.Settings):
     start_time: typing.Optional[float] = None
     stop_time: typing.Optional[float] = None
     rezero: bool = True
-    self_terminating: bool = True
+    self_terminating: bool = False
+    """
+    If True, the unit will raise a :obj:`ez.NormalTermination` exception when the file is exhausted.
+    Note, however, that this will terminate the pipeline even if the data published by this unit are still in transit,
+    which will lead to the pipeline output being truncated before it has finished processing the stream.
+    `self_terminating` should only be used when it is not important that the pipeline finish processing data, such
+    as during prototyping and testing. 
+    """
 
 
 class XDFIteratorUnit(ez.Unit):

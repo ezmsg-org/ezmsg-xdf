@@ -15,20 +15,6 @@ MultiStreamMessage = frozendict[
 
 
 class XDFIterator:
-    """
-    An Iterator that yields chunks from an XDF.
-    A typical offline analysis might load the entire file into memory, then perform a processing step on the entire
-    recording duration, and the next step on the entire result of the first step, and so on. This might require a
-    tremendous amount of memory and, if one is not careful about memory layout, can be incredibly slow. An alternative
-    procedure is to load the file into memory a chunk at a time (see Note1), then pass that chunk through the entire
-    processing pipeline, then proceed onto the next chunk (See Note2). We create an Iterator to provide our chunks.
-    > Note1: I have not written a true lazy-loader for XDF because it has not yet been necessary as the files are all
-    small. Thus, I use pyxdf.load_xdf which loads the entire raw data into memory. The processing is still done chunk-by-chunk.
-    > Note2: It should be possible to start on chunk[ix+1] while chunk[ix] is still going through the pipeline. Indeed,
-    this is (optionally) how it works online. However, the overhead of setting this up for offline analysis is not worth
-    the gain, at least not at this stage.
-    """
-
     def __init__(
         self,
         filepath: typing.Union[Path, str],
@@ -41,6 +27,35 @@ class XDFIterator:
         stop_time: typing.Optional[float] = None,
         rezero: bool = True,
     ):
+        """
+        An Iterator that yields chunks from an XDF.
+        A typical offline analysis might load the entire file into memory, then perform a processing step on the entire
+        recording duration, and the next step on the entire result of the first step, and so on. This might require a
+        tremendous amount of memory and, if one is not careful about memory layout, can be incredibly slow. An
+        alternative procedure is to load the file into memory a chunk at a time (see Note1), then pass that chunk
+        through the entire processing pipeline, then proceed onto the next chunk (See Note2). We create an Iterator to
+        provide our chunks.
+        > Note1: I have not written a true lazy-loader for XDF because it has not yet been necessary as the files are
+          all small. Thus, I use pyxdf.load_xdf which loads the entire raw data into memory. The processing is still
+          done chunk-by-chunk.
+        > Note2: It should be possible to start on chunk[ix+1] while chunk[ix] is still going through the pipeline.
+          Indeed, this is (optionally) how it works online. However, the overhead of setting this up for offline
+          analysis is not worth the gain, at least not at this stage.
+
+        Args:
+            filepath: The path to the file to load and iterate over.
+            select: (Optional) A set of stream names to select. If None, then all streams are selected.
+            chunk_dur: The duration of each chunk in seconds.
+            start_time: Start playback at this time. If rezero is True then this is relative to the file start time.
+                If rezero is False then this is relative to the original timestamps.
+            stop_time: Truncate the playback to stop at this time. If rezero is True then this is relative to the file
+                start time. If rezero is False then this is relative to the original timestamps.
+            rezero: The absolute value of timestamps in an XDF file are useful for synchronization WITHIN file, but they
+                are absolutely meaningless outside the exact XDF file like in an ezmsg application. Thus, by default we
+                rezero the timestamps to start at t=0.0 for simplicity. However, there may be rare circumstances where
+                one wants to compare the timestamps produced by ezmsg to timestamps produced by another XDF analysis
+                tool that does not rezero. In that case, set rezero=False.
+        """
         if isinstance(filepath, str):
             filepath = Path(filepath).expanduser()
         self._filepath = filepath
@@ -128,7 +143,7 @@ class XDFIterator:
         for strm in self._streams:
             tvec = strm["time_stamps"]
             srate = float(strm["info"]["nominal_srate"][0])
-            adj = (1/srate if srate > 0 else 0) - xdf_t0
+            adj = (1 / srate if srate > 0 else 0) - xdf_t0
             if len(tvec) > 0:
                 xdf_dur = max(xdf_dur, tvec[-1] + adj)
 
@@ -192,11 +207,15 @@ def labels_from_strm(strm: dict) -> list[str]:
 
 
 class XDFAxisArrayIterator(XDFIterator):
-    """
-    This Iterator loads only a single stream and yields a single AxisArray object per chunk.
-    """
-
     def __init__(self, *args, select: str, **kwargs):
+        """
+        This Iterator loads only a single stream and yields a single :obj:`AxisArray` object per chunk.
+
+        Args:
+            *args:
+            select: Unlike :obj:`XDFIterator`, this must be a single string, the name of the stream to select.
+            **kwargs:
+        """
         kwargs["select"] = set((select,))
         super().__init__(*args, **kwargs)
         _sel = [_ for _ in self._select][0]
@@ -239,6 +258,15 @@ class XDFAxisArrayIterator(XDFIterator):
 
 class XDFMultiAxArrIterator(XDFIterator):
     def __init__(self, *args, force_single_sample: set = set(), **kwargs):
+        """
+        This Iterator loads multiple streams and yields a single :obj:`MultiStreamMessage` object per chunk.
+
+        Args:
+            *args:
+            force_single_sample: Use this to identify irregular-rate streams that might conceivably have more than one
+                event within the defined chunk_dur, for which :obj:`AxisArray` cannot represent timestamps properly.
+            **kwargs:
+        """
         super().__init__(*args, **kwargs)
         self._force_single_sample = force_single_sample
         stream_names = [_["info"]["name"][0] for _ in self._streams]

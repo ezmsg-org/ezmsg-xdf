@@ -9,7 +9,9 @@ from ezmsg.xdf.source import XDFMultiIteratorUnit
 
 def main(file_path: Path):
     comps = {
-        "SOURCE": XDFMultiIteratorUnit(file_path, rezero=False, select=None),
+        "SOURCE": XDFMultiIteratorUnit(
+            file_path, rezero=False, select=None, self_terminating=True
+        ),
         "SINK": DebugLog(),
     }
     conns = ((comps["SOURCE"].OUTPUT_MULTI, comps["SINK"].INPUT),)
