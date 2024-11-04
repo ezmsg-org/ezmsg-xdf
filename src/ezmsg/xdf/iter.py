@@ -1,17 +1,12 @@
-import typing
 from dataclasses import replace
 from pathlib import Path
+import queue
+import typing
 
 import numpy as np
 import numpy.typing as npt
 import pyxdf
 from ezmsg.lsl.util import AxisArray
-from frozendict import frozendict
-
-
-MultiStreamMessage = frozendict[
-    str, typing.Union[AxisArray, tuple[AxisArray, ...]]
-]  # type alias
 
 
 class XDFIterator:
@@ -235,10 +230,9 @@ class XDFAxisArrayIterator(XDFIterator):
         )
 
     def __next__(self) -> AxisArray:
-        data = self._template.data
-        tvec = []
+        result: typing.Optional[AxisArray] = None
         chunk_dict = super().__next__()
-        # Should only be 1 in self._select
+        # Should only be 1 in self._select. If there are more then we overwrite with the last.
         for strm_name in self._select:
             if strm_name in chunk_dict:
                 data, tvec = chunk_dict[strm_name]
@@ -259,7 +253,8 @@ class XDFAxisArrayIterator(XDFIterator):
 class XDFMultiAxArrIterator(XDFIterator):
     def __init__(self, *args, force_single_sample: set = set(), **kwargs):
         """
-        This Iterator loads multiple streams and yields a single :obj:`MultiStreamMessage` object per chunk.
+        This Iterator loads multiple streams and yields a :obj:`AxisArray` object per iteration,
+        but the stream source might different between chunks.
 
         Args:
             *args:
@@ -288,40 +283,45 @@ class XDFMultiAxArrIterator(XDFIterator):
                 },
                 key=stream_name,
             )
+        self._pubqueue: queue.SimpleQueue[AxisArray] = queue.SimpleQueue()
 
-    def __next__(self) -> MultiStreamMessage:
-        # Prepare output
-        chunk_dict = super().__next__()
-        out_dict = {}
-        for k, template in self._templates.items():
-            if k in chunk_dict and len(chunk_dict[k][1]) > 0:
-                data, tvec = chunk_dict[k]
-                if k in self._force_single_sample:
-                    msgs = []
-                    for ix, _t in enumerate(tvec):
-                        msgs.append(
+    def __next__(self) -> typing.Optional[AxisArray]:
+        if self._pubqueue.empty():
+            chunk_dict = super().__next__()
+            for k, template in self._templates.items():
+                if k in chunk_dict and len(chunk_dict[k][1]) > 0:
+                    data, tvec = chunk_dict[k]
+                    if k in self._force_single_sample:
+                        for ix, _t in enumerate(tvec):
+                            self._pubqueue.put_nowait(
+                                replace(
+                                    template,
+                                    data=data[ix : ix + 1],
+                                    axes={
+                                        **template.axes,
+                                        "time": replace(
+                                            template.axes["time"], offset=_t
+                                        ),
+                                    },
+                                )
+                            )
+                    else:
+                        self._pubqueue.put_nowait(
                             replace(
                                 template,
-                                data=data[ix : ix + 1],
+                                data=data,
                                 axes={
                                     **template.axes,
-                                    "time": replace(template.axes["time"], offset=_t),
+                                    "time": replace(
+                                        template.axes["time"],
+                                        offset=tvec[0]
+                                        if len(tvec)
+                                        else self._last_time,
+                                    ),
                                 },
                             )
                         )
-                    out_dict[k] = tuple(msgs)
-                else:
-                    out_dict[k] = (
-                        replace(
-                            template,
-                            data=data,
-                            axes={
-                                **template.axes,
-                                "time": replace(
-                                    template.axes["time"],
-                                    offset=tvec[0] if len(tvec) else self._last_time,
-                                ),
-                            },
-                        ),
-                    )
-        return MultiStreamMessage(out_dict)
+        try:
+            return self._pubqueue.get_nowait()
+        except queue.Empty:
+            return None

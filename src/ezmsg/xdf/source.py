@@ -7,7 +7,7 @@ import ezmsg.core as ez
 from ezmsg.util.generator import GenState
 from ezmsg.util.messages.axisarray import AxisArray
 
-from .iter import XDFAxisArrayIterator, XDFMultiAxArrIterator, MultiStreamMessage
+from .iter import XDFAxisArrayIterator, XDFMultiAxArrIterator
 
 
 class XDFIteratorSettings(ez.Settings):
@@ -74,7 +74,7 @@ class XDFMultiIteratorUnit(ez.Unit):
     STATE = GenState
     SETTINGS = XDFMultiIteratorUnitSettings
 
-    OUTPUT_MULTI = ez.OutputStream(MultiStreamMessage)
+    OUTPUT_SIGNAL = ez.OutputStream(AxisArray)
     OUTPUT_TERM = ez.OutputStream(typing.Any)
 
     def initialize(self) -> None:
@@ -91,13 +91,13 @@ class XDFMultiIteratorUnit(ez.Unit):
             force_single_sample=self.SETTINGS.force_single_sample,
         )
 
-    @ez.publisher(OUTPUT_MULTI)
+    @ez.publisher(OUTPUT_SIGNAL)
     async def pub_multi(self) -> typing.AsyncGenerator:
         try:
             while True:
                 msg = next(self.STATE.gen)
-                if len(msg) > 0:
-                    yield self.OUTPUT_MULTI, msg
+                if msg is not None:
+                    yield self.OUTPUT_SIGNAL, msg
                 else:
                     await asyncio.sleep(0)
         except StopIteration:
