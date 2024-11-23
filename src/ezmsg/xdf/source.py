@@ -14,8 +14,8 @@ class XDFIteratorSettings(ez.Settings):
     filepath: typing.Union[os.PathLike, str]
     select: str
     chunk_dur: float = 1.0
-    start_time: typing.Optional[float] = None
-    stop_time: typing.Optional[float] = None
+    start_time: float | None = None
+    stop_time: float | None = None
     rezero: bool = True
     self_terminating: bool = False
     """
@@ -66,7 +66,7 @@ class XDFIteratorUnit(ez.Unit):
 
 
 class XDFMultiIteratorUnitSettings(XDFIteratorSettings):
-    select: typing.Optional[set[str]] = None  # Override with a default
+    select: set[str] | None = None  # Override with a default
     force_single_sample: set = field(default_factory=set)
 
 

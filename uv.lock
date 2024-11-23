@@ -59,39 +59,31 @@ wheels = [
 
 [[package]]
 name = "ezmsg-xdf"
-version = "0.1.dev4+g0c5d38f.d20241104"
+version = "0.2.dev2+g4620c07.d20241123"
 source = { editable = "." }
 dependencies = [
-    { name = "ezmsg" },
     { name = "ezmsg-lsl" },
     { name = "numpy" },
     { name = "pyxdf" },
 ]
 
 [package.optional-dependencies]
-test = [
-    { name = "pytest" },
-]
-
-[package.dev-dependencies]
 dev = [
     { name = "ruff" },
     { name = "typer" },
 ]
+test = [
+    { name = "pytest" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "ezmsg", specifier = ">=3.5.0" },
     { name = "ezmsg-lsl", specifier = ">=0.5.0" },
     { name = "numpy", specifier = ">=2.0.2" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.3.3" },
     { name = "pyxdf", specifier = ">=1.16.8" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "ruff", specifier = ">=0.6.8" },
-    { name = "typer", specifier = ">=0.12.5" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.8" },
+    { name = "typer", marker = "extra == 'dev'", specifier = ">=0.12.5" },
 ]
 
 [[package]]

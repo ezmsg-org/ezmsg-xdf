@@ -1,7 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
 import queue
-import typing
 
 import numpy as np
 import numpy.typing as npt
@@ -12,14 +11,13 @@ from ezmsg.lsl.util import AxisArray
 class XDFIterator:
     def __init__(
         self,
-        filepath: typing.Union[Path, str],
-        select: typing.Optional[
-            set[str]
-        ] = None,  # If set, then the iterator yields only AxisArray of selected stream(s).
+        filepath: Path | str,
+        select: set[str]
+        | None = None,  # If set, then the iterator yields only AxisArray of selected stream(s).
         # If None (default), then the iterator yields dicts with keys for each stream
         chunk_dur: float = 1.0,  # Attempt to chunk data into chunks of this duration.
-        start_time: typing.Optional[float] = None,
-        stop_time: typing.Optional[float] = None,
+        start_time: float | None = None,
+        stop_time: float | None = None,
         rezero: bool = True,
     ):
         """
@@ -65,9 +63,7 @@ class XDFIterator:
         self._prev_file_read_s: float = (
             0  # File read header in seconds for previous iteration
         )
-        self._time_range: typing.Tuple[
-            typing.Optional[float], typing.Optional[float]
-        ] = (start_time, stop_time)
+        self._time_range: tuple[float | None, float | None] = (start_time, stop_time)
         self._scan_file()
 
     def _scan_file(self):
@@ -158,7 +154,7 @@ class XDFIterator:
         )
 
     @property
-    def stream_meta(self) -> typing.Union[list[dict], dict]:
+    def stream_meta(self) -> list[dict] | dict:
         return self._metadata
 
     @property
@@ -230,7 +226,7 @@ class XDFAxisArrayIterator(XDFIterator):
         )
 
     def __next__(self) -> AxisArray:
-        result: typing.Optional[AxisArray] = None
+        result: AxisArray | None = None
         chunk_dict = super().__next__()
         # Should only be 1 in self._select. If there are more then we overwrite with the last.
         for strm_name in self._select:
@@ -285,7 +281,7 @@ class XDFMultiAxArrIterator(XDFIterator):
             )
         self._pubqueue: queue.SimpleQueue[AxisArray] = queue.SimpleQueue()
 
-    def __next__(self) -> typing.Optional[AxisArray]:
+    def __next__(self) -> AxisArray | None:
         if self._pubqueue.empty():
             chunk_dict = super().__next__()
             for k, template in self._templates.items():

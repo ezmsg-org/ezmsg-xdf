@@ -9,7 +9,6 @@ requires-python = ">=3.9"
 dynamic = ["version"]
 dependencies = [
     "ezmsg-lsl>=0.5.0",
-    "ezmsg>=3.5.0",
     "numpy>=2.0.2",
     "pyxdf>=1.16.8",
 ]
