@@ -1,11 +1,11 @@
-from dataclasses import replace
 from pathlib import Path
 import queue
 
 import numpy as np
 import numpy.typing as npt
 import pyxdf
-from ezmsg.lsl.util import AxisArray
+from ezmsg.util.messages.axisarray import AxisArray
+from ezmsg.util.messages.util import replace
 
 
 class XDFIterator:
@@ -219,8 +219,8 @@ class XDFAxisArrayIterator(XDFIterator):
             ),
             dims=["time", "ch"],
             axes={
-                "time": AxisArray.Axis.TimeAxis(fs=fs, offset=0.0),
-                "ch": AxisArray.Axis.SpaceAxis(labels=labels),
+                "time": AxisArray.TimeAxis(fs=fs, offset=0.0),
+                "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
             },
             key=self._streams[0]["info"]["name"][0],
         )
@@ -274,8 +274,8 @@ class XDFMultiAxArrIterator(XDFIterator):
                 ),
                 dims=["time", "ch"],
                 axes={
-                    "time": AxisArray.Axis.TimeAxis(fs=fs or 1.0, offset=0.0),
-                    "ch": AxisArray.Axis.SpaceAxis(labels=labels),
+                    "time": AxisArray.TimeAxis(fs=fs or 1.0, offset=0.0),
+                    "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
                 },
                 key=stream_name,
             )
