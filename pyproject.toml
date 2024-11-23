@@ -18,6 +18,10 @@ dependencies = [
 test = [
     "pytest>=8.3.3",
 ]
+dev = [
+    "ruff>=0.6.8",
+    "typer>=0.12.5",
+]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -31,9 +35,3 @@ version-file = "src/ezmsg/xdf/__version__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ezmsg"]
-
-[tool.uv]
-dev-dependencies = [
-    "ruff>=0.6.8",
-    "typer>=0.12.5",
-]
