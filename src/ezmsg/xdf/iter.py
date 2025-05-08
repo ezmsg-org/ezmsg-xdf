@@ -211,7 +211,7 @@ class XDFAxisArrayIterator(XDFIterator):
         super().__init__(*args, **kwargs)
         _sel = [_ for _ in self._select][0]
         labels = labels_from_strm(self._streams[0])
-        if self._metdata[_sel].get("nominal_srate", None):
+        if self._metadata[_sel].get("nominal_srate", None):
             time_ax = AxisArray.TimeAxis(
                 fs=self._metadata[_sel]["nominal_srate"], offset=0
             )
