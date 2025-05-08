@@ -45,7 +45,7 @@ wheels = [
 
 [[package]]
 name = "ezmsg-xdf"
-version = "0.2.dev3+g61f3a5e.d20241123"
+version = "0.2.1.dev0+gae156b5.d20250507"
 source = { editable = "." }
 dependencies = [
     { name = "ezmsg" },

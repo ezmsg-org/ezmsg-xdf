@@ -210,16 +210,24 @@ class XDFAxisArrayIterator(XDFIterator):
         kwargs["select"] = set((select,))
         super().__init__(*args, **kwargs)
         _sel = [_ for _ in self._select][0]
-        fs = self._metadata[_sel]["nominal_srate"] or 1.0
         labels = labels_from_strm(self._streams[0])
-
+        if self._metdata[_sel].get("nominal_srate", None):
+            time_ax = AxisArray.TimeAxis(
+                fs=self._metadata[_sel]["nominal_srate"], offset=0
+            )
+        else:
+            time_ax = AxisArray.CoordinateAxis(
+                data=np.array([]),
+                dims=["time"],
+                unit="s"
+            )
         self._template = AxisArray(
             data=np.zeros(
                 (0, len(labels)), dtype=self._streams[0]["time_series"].dtype
             ),
             dims=["time", "ch"],
             axes={
-                "time": AxisArray.TimeAxis(fs=fs, offset=0.0),
+                "time": time_ax,
                 "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
             },
             key=self._streams[0]["info"]["name"][0],
@@ -232,6 +240,10 @@ class XDFAxisArrayIterator(XDFIterator):
         for strm_name in self._select:
             if strm_name in chunk_dict:
                 data, tvec = chunk_dict[strm_name]
+                if isinstance(self._template.axes["time"], AxisArray.CoordinateAxis):
+                    t_kwargs = {"data": tvec}
+                else:
+                    t_kwargs = {"offset": tvec[0] if len(tvec) else self._last_time}
                 result = replace(
                     self._template,
                     data=data,
@@ -239,7 +251,7 @@ class XDFAxisArrayIterator(XDFIterator):
                         **self._template.axes,
                         "time": replace(
                             self._template.axes["time"],
-                            offset=tvec[0] if len(tvec) else self._last_time,
+                            **t_kwargs,
                         ),
                     },
                 )
@@ -268,13 +280,18 @@ class XDFMultiAxArrIterator(XDFIterator):
             stream = self._streams[stream_names.index(stream_name)]
             labels = labels_from_strm(stream)
             fs = stream_meta["nominal_srate"]
+            time_ax = (
+                AxisArray.TimeAxis(fs=fs, offset=0.0)
+                if fs
+                else AxisArray.CoordinateAxis(data=np.array([]), dims=["time"], unit="s")
+            )
             self._templates[stream_name] = AxisArray(
                 data=np.zeros(
                     (0, stream_meta["channel_count"]), dtype=stream["time_series"].dtype
                 ),
                 dims=["time", "ch"],
                 axes={
-                    "time": AxisArray.TimeAxis(fs=fs or 1.0, offset=0.0),
+                    "time": time_ax,
                     "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
                 },
                 key=stream_name,
@@ -288,7 +305,15 @@ class XDFMultiAxArrIterator(XDFIterator):
                 if k in chunk_dict and len(chunk_dict[k][1]) > 0:
                     data, tvec = chunk_dict[k]
                     if k in self._force_single_sample:
+                        if isinstance(template.axes["time"], AxisArray.CoordinateAxis):
+                            t_kwargs = {"data": np.array([])}
+                        else:
+                            t_kwargs = {"offset": 0.0}
                         for ix, _t in enumerate(tvec):
+                            if "data" in t_kwargs:
+                                t_kwargs["data"] = np.array([_t])
+                            else:
+                                t_kwargs["offset"] = _t
                             self._pubqueue.put_nowait(
                                 replace(
                                     template,
@@ -296,12 +321,18 @@ class XDFMultiAxArrIterator(XDFIterator):
                                     axes={
                                         **template.axes,
                                         "time": replace(
-                                            template.axes["time"], offset=_t
+                                            template.axes["time"], **t_kwargs
                                         ),
                                     },
                                 )
                             )
                     else:
+                        if isinstance(template.axes["time"], AxisArray.CoordinateAxis):
+                            t_kwargs = {"data": tvec if len(tvec) else np.array([])}
+                        else:
+                            t_kwargs = {
+                                "offset": tvec[0] if len(tvec) else self._last_time
+                            }
                         self._pubqueue.put_nowait(
                             replace(
                                 template,
@@ -310,9 +341,7 @@ class XDFMultiAxArrIterator(XDFIterator):
                                     **template.axes,
                                     "time": replace(
                                         template.axes["time"],
-                                        offset=tvec[0]
-                                        if len(tvec)
-                                        else self._last_time,
+                                        **t_kwargs,
                                     ),
                                 },
                             )
