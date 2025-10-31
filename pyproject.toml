@@ -13,13 +13,24 @@ dependencies = [
     "pyxdf>=1.16.8",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
+dev = [
+    {include-group = "lint"},
+    {include-group = "test"},
+    "typer>=0.12.5",
+]
+lint = [
+    "ruff>=0.12.9",
+]
 test = [
     "pytest>=8.3.3",
 ]
-dev = [
-    "ruff>=0.6.8",
-    "typer>=0.12.5",
+docs = [
+  "sphinx>=7.0",
+  "sphinx-autodoc-typehints",
+  "sphinx-copybutton",
+  "pydata-sphinx-theme",
+  "myst-parser",
 ]
 
 [build-system]
