@@ -10,3 +10,4 @@ wheels/
 .venv
 
 src/ezmsg/xdf/__version__.py
+uv.lock

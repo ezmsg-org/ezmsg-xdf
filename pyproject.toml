@@ -5,7 +5,7 @@ readme = "README.md"
 authors = [
     { name = "Chadwick Boulay", email = "chadwick.boulay@gmail.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10.15"
 dynamic = ["version"]
 dependencies = [
     "ezmsg>=3.6.0",
@@ -18,6 +18,7 @@ dev = [
     {include-group = "lint"},
     {include-group = "test"},
     "typer>=0.12.5",
+    "pre-commit>=4.0.0",
 ]
 lint = [
     "ruff>=0.12.9",
@@ -45,3 +46,24 @@ version-file = "src/ezmsg/xdf/__version__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ezmsg"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+# Exclude auto-generated files
+exclude = ["*/__version__.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ezmsg.xdf"]
+known-third-party = ["ezmsg"]
+
+[tool.uv.sources]
+# Uncomment to use development version of ezmsg from git
+ezmsg = { git = "https://github.com/ezmsg-org/ezmsg.git", branch = "dev" }
