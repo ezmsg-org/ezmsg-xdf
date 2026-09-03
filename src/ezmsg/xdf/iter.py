@@ -208,14 +208,25 @@ class XDFAxisArrayIterator(XDFIterator):
             time_ax = AxisArray.TimeAxis(fs=self._metadata[_sel]["nominal_srate"], offset=0)
         else:
             time_ax = AxisArray.CoordinateAxis(data=np.array([]), dims=["time"], unit="s")
+        ch_ax = AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"])
+        # Compute the channel fingerprint once, now. It is cached on the axis and
+        # pickled with it, and every message from this stream reuses this same axis
+        # object, so one checksum covers the whole file. Left cold it would be
+        # computed by the first stateful consumer in this process -- and, since
+        # unpickling builds a new axis object per message, by the first consumer in
+        # every other process, on every message.
+        ch_ax.fingerprint
         self._template = AxisArray(
             data=np.zeros((0, len(labels)), dtype=self._streams[0]["time_series"].dtype),
             dims=["time", "ch"],
             axes={
                 "time": time_ax,
-                "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
+                "ch": ch_ax,
             },
             key=self._streams[0]["info"]["name"][0],
+            # Messages accumulate along `time`, whether the stream is regular or
+            # carries per-sample timestamps; `ch` describes the stream itself.
+            chunk_dim="time",
         )
 
     def __next__(self) -> AxisArray:
@@ -270,14 +281,17 @@ class XDFMultiAxArrIterator(XDFIterator):
                 if fs
                 else AxisArray.CoordinateAxis(data=np.array([]), dims=["time"], unit="s")
             )
+            ch_ax = AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"])
+            ch_ax.fingerprint  # primed once per stream -- see the single-stream iterator above
             self._templates[stream_name] = AxisArray(
                 data=np.zeros((0, stream_meta["channel_count"]), dtype=stream["time_series"].dtype),
                 dims=["time", "ch"],
                 axes={
                     "time": time_ax,
-                    "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
+                    "ch": ch_ax,
                 },
                 key=stream_name,
+                chunk_dim="time",
             )
         self._pubqueue: queue.SimpleQueue[AxisArray] = queue.SimpleQueue()
 
