@@ -10,12 +10,21 @@ from __future__ import annotations
 import math
 import pickle
 
+import ezmsg.core as ez
 import numpy as np
 import pytest
 from conftest import EEG_STREAM, MARKER_STREAM
 from ezmsg.util.messages.axisarray import AxisArray
+from ezmsg.util.messages.util import replace as replace_settings
 
-from ezmsg.xdf.iter import XDFAxisArrayIterator, XDFIterator, XDFMultiAxArrIterator
+from ezmsg.xdf.iter import (
+    XDFAxisArrayIterator,
+    XDFIterator,
+    XDFIteratorSettings,
+    XDFMultiAxArrIterator,
+    XDFMultiIteratorSettings,
+)
+from ezmsg.xdf.source import XDFIteratorUnit, XDFMultiIteratorUnit
 
 
 def eeg_messages(path, **kwargs) -> list[AxisArray]:
@@ -185,3 +194,113 @@ class TestTheFixtureItself:
         """Otherwise the reader's chunk stitching is never exercised."""
         assert EEG_STREAM.n_samples > 32
         assert math.ceil(EEG_STREAM.n_samples / 32) > 1
+
+
+class TestTheProducerContract:
+    """The producers are `BaseStatefulProducer`s, which means the file open is a
+    state reset rather than construction work."""
+
+    def test_construction_does_not_read_the_file(self, test_xdf_path):
+        """Deliberately unlike ezmsg-neo and ezmsg-nwb, which reset eagerly in
+        ``__init__`` and so pay the whole open on the event loop during
+        ``initialize``. Nothing here reads stream metadata before the first
+        chunk, so there is nothing to lose by waiting."""
+        it = XDFAxisArrayIterator(filepath=test_xdf_path, select=EEG_STREAM.name)
+        assert it._state.reader is None
+        assert next(it) is not None
+        assert it._state.reader is not None
+
+    def test_the_file_load_runs_off_the_event_loop(self, test_xdf_path):
+        """``pyxdf.load_xdf`` reads and decodes the whole file. On the event loop
+        that stalls every other unit in the process.
+
+        Driven with ``asyncio.run`` rather than an async test, because this repo
+        has no pytest-asyncio -- the pytest config names ``asyncio_mode`` but the
+        plugin is not installed, so an ``async def`` test is silently never
+        awaited and passes without running.
+        """
+        import asyncio
+        import threading
+
+        seen: list[int] = []
+
+        class Spy(XDFAxisArrayIterator):
+            def _reset_state(self):
+                seen.append(threading.get_ident())
+                super()._reset_state()
+
+        producer = Spy(filepath=test_xdf_path, select=EEG_STREAM.name)
+        assert not seen, "construction should not have opened anything"
+
+        loop_tid: list[int] = []
+
+        async def drive():
+            loop_tid.append(threading.get_ident())
+            await producer.__acall__()
+
+        asyncio.run(drive())
+
+        assert len(seen) == 1
+        assert seen[0] != loop_tid[0], "_reset_state ran on the event-loop thread"
+
+    def test_settings_arrive_as_keywords_or_as_a_settings_object(self, test_xdf_path):
+        by_kwargs = XDFAxisArrayIterator(filepath=test_xdf_path, select=EEG_STREAM.name, chunk_dur=0.5)
+        by_settings = XDFAxisArrayIterator(
+            settings=XDFIteratorSettings(filepath=test_xdf_path, select=EEG_STREAM.name, chunk_dur=0.5)
+        )
+        assert by_kwargs.settings == by_settings.settings
+
+    def test_pacing_settings_do_not_reopen_the_file(self, test_xdf_path):
+        """``playback_rate`` and ``self_terminating`` belong to the unit, so
+        changing either must not throw away a loaded file."""
+        it = XDFAxisArrayIterator(filepath=test_xdf_path, select=EEG_STREAM.name)
+        next(it)
+        reader = it._state.reader
+        it.update_settings(replace_settings(it.settings, playback_rate=2.0, self_terminating=True))
+        next(it)
+        assert it._state.reader is reader
+
+    def test_changing_the_file_does_reopen(self, test_xdf_path):
+        it = XDFAxisArrayIterator(filepath=test_xdf_path, select=EEG_STREAM.name)
+        next(it)
+        reader = it._state.reader
+        it.update_settings(replace_settings(it.settings, chunk_dur=0.25))
+        next(it)
+        assert it._state.reader is not reader
+
+
+class TestTheUnitsInAGraph:
+    @staticmethod
+    def _run(unit_cls, settings) -> list[AxisArray]:
+        collected: list[AxisArray] = []
+
+        class Collector(ez.Unit):
+            INPUT_SIGNAL = ez.InputStream(AxisArray)
+
+            @ez.subscriber(INPUT_SIGNAL)
+            async def on_msg(self, msg: AxisArray) -> None:
+                collected.append(msg)
+
+        src, sink = unit_cls(settings), Collector()
+        ez.run(SRC=src, SINK=sink, connections=((src.OUTPUT_SIGNAL, sink.INPUT_SIGNAL),))
+        return collected
+
+    def test_the_single_stream_unit_publishes_the_whole_file(self, test_xdf_path):
+        msgs = self._run(
+            XDFIteratorUnit,
+            XDFIteratorSettings(filepath=test_xdf_path, select=EEG_STREAM.name, self_terminating=True),
+        )
+        assert msgs, "no messages published"
+        assert sum(m.data.shape[0] for m in msgs) == EEG_STREAM.n_samples
+        assert all(m.chunk_dim == "time" for m in msgs)
+        assert all("_fingerprint" in m.axes["ch"].__dict__ for m in msgs)
+
+    def test_the_multi_stream_unit_publishes_both_streams(self, test_xdf_path):
+        msgs = self._run(
+            XDFMultiIteratorUnit,
+            XDFMultiIteratorSettings(filepath=test_xdf_path, self_terminating=True),
+        )
+        assert {m.key for m in msgs} == {EEG_STREAM.name, MARKER_STREAM.name}
+        eeg = [m for m in msgs if m.key == EEG_STREAM.name]
+        assert sum(m.data.shape[0] for m in eeg) == EEG_STREAM.n_samples
+        assert all(m.chunk_dim == "time" for m in msgs)
