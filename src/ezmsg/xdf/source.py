@@ -1,13 +1,30 @@
 import asyncio
-import os
 import time
 import typing
-from dataclasses import field
 
 import ezmsg.core as ez
+from ezmsg.baseproc.units import BaseProducerUnit
 from ezmsg.util.messages.axisarray import AxisArray
 
-from .iter import XDFAxisArrayIterator, XDFMultiAxArrIterator
+from .iter import (
+    XDFAxisArrayIterator,
+    XDFIteratorSettings,
+    XDFMultiAxArrIterator,
+    XDFMultiIteratorSettings,
+)
+
+# The settings types moved to `iter.py` so the producers can own them, but they
+# were importable from here first.
+XDFMultiIteratorUnitSettings = XDFMultiIteratorSettings
+
+__all__ = [
+    "PlaybackClock",
+    "XDFIteratorSettings",
+    "XDFIteratorUnit",
+    "XDFMultiIteratorSettings",
+    "XDFMultiIteratorUnit",
+    "XDFMultiIteratorUnitSettings",
+]
 
 
 class PlaybackClock:
@@ -47,113 +64,75 @@ class PlaybackClock:
         time.sleep(self._get_duration())
 
 
-class XDFIteratorSettings(ez.Settings):
-    filepath: typing.Union[os.PathLike, str]
-    select: str
-    chunk_dur: float = 1.0
-    start_time: float | None = None
-    stop_time: float | None = None
-    rezero: bool = True
-    playback_rate: float | None = None
-    self_terminating: bool = False
-    """
-    If True, the unit will raise a :obj:`ez.NormalTermination` exception when the file is exhausted.
-    Note, however, that this will terminate the pipeline even if the data published by this unit are still in transit,
-    which will lead to the pipeline output being truncated before it has finished processing the stream.
-    `self_terminating` should only be used when it is not important that the pipeline finish processing data, such
-    as during prototyping and testing.
+class _XDFUnitBase:
+    """Playback pacing and end-of-file handling, shared by both units.
+
+    Note both subclasses name their publisher ``produce``: that is the name
+    ``BaseProducerUnit`` uses, and ezmsg collects publishers per attribute, so a
+    differently named one would run *alongside* the base class\'s rather than
+    replacing it -- two publishers draining one producer, neither stopping.
+
+    The producer supplies chunks as fast as they can be sliced out of memory;
+    ``playback_rate`` is what turns that into a paced stream, and it is a
+    property of the unit rather than of the reader.
     """
 
+    OUTPUT_TERM = ez.OutputStream(typing.Any)
 
-class XDFIteratorState(ez.State):
-    gen: typing.Any = None
+    async def initialize(self) -> None:
+        await super().initialize()
+        self._clock = (
+            PlaybackClock(rate=self.SETTINGS.playback_rate, step_dur=self.SETTINGS.chunk_dur)
+            if self.SETTINGS.playback_rate is not None
+            else None
+        )
+
+    async def _finish(self) -> typing.AsyncGenerator:
+        ez.logger.debug(f"File ({self.SETTINGS.filepath} :: {self.SETTINGS.select}) exhausted.")
+        if self.SETTINGS.self_terminating:
+            raise ez.NormalTermination
+        yield self.OUTPUT_TERM, True
 
 
-class XDFIteratorUnit(ez.Unit):
-    STATE = XDFIteratorState
+class XDFIteratorUnit(
+    _XDFUnitBase,
+    BaseProducerUnit[XDFIteratorSettings, AxisArray, XDFAxisArrayIterator],
+):
     SETTINGS = XDFIteratorSettings
 
     OUTPUT_SIGNAL = ez.OutputStream(AxisArray)
-    OUTPUT_TERM = ez.OutputStream(typing.Any)
-
-    def initialize(self) -> None:
-        self.construct_generator()
-
-    def construct_generator(self):
-        self.STATE.gen = XDFAxisArrayIterator(
-            filepath=self.SETTINGS.filepath,
-            select=self.SETTINGS.select,
-            chunk_dur=self.SETTINGS.chunk_dur,
-            start_time=self.SETTINGS.start_time,
-            stop_time=self.SETTINGS.stop_time,
-            rezero=self.SETTINGS.rezero,
-        )
-        if self.SETTINGS.playback_rate is not None:
-            self._clock = PlaybackClock(rate=self.SETTINGS.playback_rate, step_dur=self.SETTINGS.chunk_dur)
-        else:
-            self._clock = None
 
     @ez.publisher(OUTPUT_SIGNAL)
-    async def pub_chunk(self) -> typing.AsyncGenerator:
-        try:
-            while True:
-                if self._clock is not None:
-                    await self._clock.astep()
-                msg = next(self.STATE.gen)
-                if msg.data.size > 0:
-                    yield self.OUTPUT_SIGNAL, msg
-                else:
-                    await asyncio.sleep(0)
-        except StopIteration:
-            ez.logger.debug(f"File ({self.SETTINGS.filepath} :: {self.SETTINGS.select}) exhausted.")
-            if self.SETTINGS.self_terminating:
-                raise ez.NormalTermination
-            yield self.OUTPUT_TERM, True
+    async def produce(self) -> typing.AsyncGenerator:
+        while not self.producer.exhausted:
+            if self._clock is not None:
+                await self._clock.astep()
+            msg = await self.producer.__acall__()
+            if msg is not None and msg.data.size > 0:
+                yield self.OUTPUT_SIGNAL, msg
+            else:
+                await asyncio.sleep(0)
+        async for out in self._finish():
+            yield out
 
 
-class XDFMultiIteratorUnitSettings(XDFIteratorSettings):
-    select: set[str] | None = None  # Override with a default
-    force_single_sample: set = field(default_factory=set)
-
-
-class XDFMultiIteratorUnit(ez.Unit):
-    STATE = XDFIteratorState
-    SETTINGS = XDFMultiIteratorUnitSettings
+class XDFMultiIteratorUnit(
+    _XDFUnitBase,
+    BaseProducerUnit[XDFMultiIteratorSettings, AxisArray, XDFMultiAxArrIterator],
+):
+    SETTINGS = XDFMultiIteratorSettings
 
     OUTPUT_SIGNAL = ez.OutputStream(AxisArray)
-    OUTPUT_TERM = ez.OutputStream(typing.Any)
-
-    def initialize(self) -> None:
-        self.construct_generator()
-
-    def construct_generator(self):
-        self.STATE.gen = XDFMultiAxArrIterator(
-            filepath=self.SETTINGS.filepath,
-            select=self.SETTINGS.select,
-            chunk_dur=self.SETTINGS.chunk_dur,
-            start_time=self.SETTINGS.start_time,
-            stop_time=self.SETTINGS.stop_time,
-            rezero=self.SETTINGS.rezero,
-            force_single_sample=self.SETTINGS.force_single_sample,
-        )
-        if self.SETTINGS.playback_rate is not None:
-            self._clock = PlaybackClock(rate=self.SETTINGS.playback_rate, step_dur=self.SETTINGS.chunk_dur)
-        else:
-            self._clock = None
 
     @ez.publisher(OUTPUT_SIGNAL)
-    async def pub_multi(self) -> typing.AsyncGenerator:
-        try:
-            while True:
-                if self._clock is not None:
-                    await self._clock.astep()
-                msg = next(self.STATE.gen)
-                if msg is not None:
-                    yield self.OUTPUT_SIGNAL, msg
-                else:
-                    await asyncio.sleep(0)
-        except StopIteration:
-            ez.logger.debug(f"File ({self.SETTINGS.filepath} :: {self.SETTINGS.select}) exhausted.")
-            if self.SETTINGS.self_terminating:
-                raise ez.NormalTermination
-            yield self.OUTPUT_TERM, True
+    async def produce(self) -> typing.AsyncGenerator:
+        while not self.producer.exhausted:
+            if self._clock is not None:
+                await self._clock.astep()
+            msg = await self.producer.__acall__()
+            if msg is not None:
+                yield self.OUTPUT_SIGNAL, msg
+            else:
+                await asyncio.sleep(0)
+        async for out in self._finish():
+            yield out

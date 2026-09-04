@@ -1,9 +1,16 @@
-from pathlib import Path
+import asyncio
+import os
 import queue
+import typing
+from dataclasses import field
+from pathlib import Path
 
+import ezmsg.core as ez
 import numpy as np
 import numpy.typing as npt
 import pyxdf
+from ezmsg.baseproc.protocols import processor_state
+from ezmsg.baseproc.stateful import BaseStatefulProducer
 from ezmsg.util.messages.axisarray import AxisArray
 from ezmsg.util.messages.util import replace
 
@@ -12,8 +19,7 @@ class XDFIterator:
     def __init__(
         self,
         filepath: Path | str,
-        select: set[str]
-        | None = None,  # If set, then the iterator yields only AxisArray of selected stream(s).
+        select: set[str] | None = None,  # If set, then the iterator yields only AxisArray of selected stream(s).
         # If None (default), then the iterator yields dicts with keys for each stream
         chunk_dur: float = 1.0,  # Attempt to chunk data into chunks of this duration.
         start_time: float | None = None,
@@ -60,9 +66,7 @@ class XDFIterator:
         self._chunk_ix = 0
         self._last_time = 0.0
         self._metadata = {}
-        self._prev_file_read_s: float = (
-            0  # File read header in seconds for previous iteration
-        )
+        self._prev_file_read_s: float = 0  # File read header in seconds for previous iteration
         self._time_range: tuple[float | None, float | None] = (start_time, stop_time)
         self._scan_file()
 
@@ -79,9 +83,7 @@ class XDFIterator:
         # Load xdf
         self._streams, fileheader = pyxdf.load_xdf(
             self._filepath,
-            select_streams=None
-            if (self._select is None or self._rezero)
-            else [{"name": _} for _ in self._select],
+            select_streams=None if (self._select is None or self._rezero) else [{"name": _} for _ in self._select],
         )
         self._metadata = {}
         self._file_read_s = 0
@@ -148,7 +150,7 @@ class XDFIterator:
             self._streams = [self._streams[stream_names.index(_)] for _ in self._select]
             self._metadata = {k: self._metadata[k] for k in self._select}
 
-        print(
+        ez.logger.info(
             f"Imported {len(self._streams)} streams from {self._filepath} "
             f"spanning {xdf_dur:.2f} s beginning at t={xdf_t0:.2f}."
         )
@@ -161,12 +163,17 @@ class XDFIterator:
     def n_chunks(self) -> int:
         return self._n_chunks
 
+    @property
+    def exhausted(self) -> bool:
+        """True once every chunk boundary has been handed out."""
+        return self._chunk_ix >= self._n_chunks
+
     def __iter__(self):
         self._chunk_ix = 0
         return self
 
     def __next__(self) -> dict[str, tuple[npt.NDArray, npt.NDArray]]:
-        if self._chunk_ix >= self.n_chunks:
+        if self.exhausted:
             raise StopIteration
         else:
             out_dict = {}
@@ -175,9 +182,7 @@ class XDFIterator:
                 (self._chunk_ix + 1) * self._chunk_dur + self._t0,
             )
             for strm in self._streams:
-                b_chunk = np.logical_and(
-                    strm["time_stamps"] >= t_start, strm["time_stamps"] < t_stop
-                )
+                b_chunk = np.logical_and(strm["time_stamps"] >= t_start, strm["time_stamps"] < t_stop)
                 out_tvec = strm["time_stamps"][b_chunk]
                 out_data = strm["time_series"][b_chunk]
                 out_dict[strm["info"]["name"][0]] = (out_data, out_tvec)
@@ -197,156 +202,236 @@ def labels_from_strm(strm: dict) -> list[str]:
     return labels
 
 
-class XDFAxisArrayIterator(XDFIterator):
-    def __init__(self, *args, select: str, **kwargs):
-        """
-        This Iterator loads only a single stream and yields a single :obj:`AxisArray` object per chunk.
+def _build_template(stream: dict, name: str, n_ch: int, fs: float) -> AxisArray:
+    """The message every chunk of *stream* is a `replace` of.
 
-        Args:
-            *args:
-            select: Unlike :obj:`XDFIterator`, this must be a single string, the name of the stream to select.
-            **kwargs:
+    Built once per stream so the `ch` axis object -- and the fingerprint cached
+    on it -- is shared by every message, which is what makes priming cheap.
+    """
+    labels = labels_from_strm(stream)
+    time_ax = (
+        AxisArray.TimeAxis(fs=fs, offset=0.0)
+        if fs
+        else AxisArray.CoordinateAxis(data=np.array([]), dims=["time"], unit="s")
+    )
+    ch_ax = AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"])
+    # Compute the channel fingerprint once, now. It is cached on the axis and
+    # pickled with it, and every message from this stream reuses this same axis
+    # object, so one checksum covers the whole file. Left cold it would be
+    # computed by the first stateful consumer in this process -- and, since
+    # unpickling builds a new axis object per message, by the first consumer in
+    # every other process, on every message.
+    ch_ax.fingerprint
+    return AxisArray(
+        data=np.zeros((0, n_ch), dtype=stream["time_series"].dtype),
+        dims=["time", "ch"],
+        axes={"time": time_ax, "ch": ch_ax},
+        key=name,
+        # Messages accumulate along `time`, whether the stream is regular or
+        # carries per-sample timestamps; `ch` describes the stream itself.
+        chunk_dim="time",
+    )
+
+
+def _with_time(template: AxisArray, data: npt.NDArray, tvec: npt.NDArray, fallback_t: float) -> AxisArray:
+    """A chunk message: the template's data replaced, and its time axis advanced.
+
+    An irregular stream carries every timestamp; a regular one carries only where
+    the chunk starts, since its gain says the rest.
+    """
+    time_ax = template.axes["time"]
+    if isinstance(time_ax, AxisArray.CoordinateAxis):
+        t_kwargs = {"data": tvec if len(tvec) else np.array([])}
+    else:
+        t_kwargs = {"offset": tvec[0] if len(tvec) else fallback_t}
+    return replace(
+        template,
+        data=data,
+        axes={**template.axes, "time": replace(time_ax, **t_kwargs)},
+    )
+
+
+class XDFIteratorSettings(ez.Settings):
+    """Settings shared by both AxisArray iterators.
+
+    ``playback_rate`` and ``self_terminating`` belong to the unit rather than to
+    the reader, and are listed in :attr:`NONRESET_SETTINGS_FIELDS` so changing
+    either does not reopen the file.
+    """
+
+    filepath: typing.Union[os.PathLike, str]
+    select: str = ""
+    chunk_dur: float = 1.0
+    start_time: float | None = None
+    stop_time: float | None = None
+    rezero: bool = True
+    playback_rate: float | None = None
+    self_terminating: bool = False
+    """
+    If True, the unit will raise a :obj:`ez.NormalTermination` exception when the file is exhausted.
+    Note, however, that this will terminate the pipeline even if the data published by this unit are still in transit,
+    which will lead to the pipeline output being truncated before it has finished processing the stream.
+    `self_terminating` should only be used when it is not important that the pipeline finish processing data, such
+    as during prototyping and testing.
+    """
+
+
+class XDFMultiIteratorSettings(XDFIteratorSettings):
+    select: set[str] | None = None
+    force_single_sample: set = field(default_factory=set)
+
+
+@processor_state
+class XDFIteratorState:
+    reader: XDFIterator | None = None
+    template: AxisArray | None = None
+
+
+@processor_state
+class XDFMultiIteratorState:
+    reader: XDFIterator | None = None
+    templates: dict | None = None
+    pubqueue: queue.SimpleQueue | None = None
+
+
+class _XDFProducerBase:
+    """Shared plumbing for the two AxisArray producers.
+
+    The file load is deliberately *not* run from ``__init__``. ezmsg-neo and
+    ezmsg-nwb both reset eagerly there and so pay the whole open on the event
+    loop during ``initialize``; here the first ``__acall__`` triggers
+    ``_areset_state``, which puts it on a worker thread. Nothing in this
+    package's public surface reads stream metadata before the first chunk, so
+    there is nothing to lose by waiting.
+    """
+
+    NONRESET_SETTINGS_FIELDS = frozenset({"playback_rate", "self_terminating"})
+
+    async def _areset_state(self) -> None:
+        """Offload the sync open onto a worker thread.
+
+        ``pyxdf.load_xdf`` reads and decodes the entire file, which for a
+        several-hundred-megabyte recording is seconds of pure CPU and I/O. On the
+        event loop that stalls every other unit in the process.
         """
-        kwargs["select"] = set((select,))
-        super().__init__(*args, **kwargs)
-        _sel = [_ for _ in self._select][0]
-        labels = labels_from_strm(self._streams[0])
-        if self._metadata[_sel].get("nominal_srate", None):
-            time_ax = AxisArray.TimeAxis(
-                fs=self._metadata[_sel]["nominal_srate"], offset=0
-            )
-        else:
-            time_ax = AxisArray.CoordinateAxis(
-                data=np.array([]),
-                dims=["time"],
-                unit="s"
-            )
-        self._template = AxisArray(
-            data=np.zeros(
-                (0, len(labels)), dtype=self._streams[0]["time_series"].dtype
-            ),
-            dims=["time", "ch"],
-            axes={
-                "time": time_ax,
-                "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
-            },
-            key=self._streams[0]["info"]["name"][0],
+        await asyncio.to_thread(self._reset_state)
+
+    def _build_reader(self, select: set[str] | None) -> XDFIterator:
+        return XDFIterator(
+            filepath=self.settings.filepath,
+            select=select,
+            chunk_dur=self.settings.chunk_dur,
+            start_time=self.settings.start_time,
+            stop_time=self.settings.stop_time,
+            rezero=self.settings.rezero,
         )
 
+
+class XDFAxisArrayIterator(
+    _XDFProducerBase,
+    BaseStatefulProducer[XDFIteratorSettings, AxisArray, XDFIteratorState],
+):
+    """Loads a single stream and produces one :obj:`AxisArray` per chunk.
+
+    ``select`` must be a single stream name, unlike :obj:`XDFIterator`.
+    """
+
+    @property
+    def exhausted(self) -> bool:
+        reader = self._state.reader
+        return reader is not None and reader.exhausted
+
+    def _reset_state(self) -> None:
+        reader = self._build_reader({self.settings.select})
+        meta = reader.stream_meta[self.settings.select]
+        self._state.reader = reader
+        self._state.template = _build_template(
+            reader._streams[0],
+            name=reader._streams[0]["info"]["name"][0],
+            n_ch=meta["channel_count"],
+            fs=meta["nominal_srate"],
+        )
+
+    async def _produce(self) -> AxisArray | None:
+        reader = self._state.reader
+        try:
+            chunk_dict = next(reader)
+        except StopIteration:
+            return None
+        data, tvec = chunk_dict.get(self.settings.select, (None, None))
+        if data is None:
+            return None
+        return _with_time(self._state.template, data, tvec, reader._last_time)
+
     def __next__(self) -> AxisArray:
-        result: AxisArray | None = None
-        chunk_dict = super().__next__()
-        # Should only be 1 in self._select. If there are more then we overwrite with the last.
-        for strm_name in self._select:
-            if strm_name in chunk_dict:
-                data, tvec = chunk_dict[strm_name]
-                if isinstance(self._template.axes["time"], AxisArray.CoordinateAxis):
-                    t_kwargs = {"data": tvec}
-                else:
-                    t_kwargs = {"offset": tvec[0] if len(tvec) else self._last_time}
-                result = replace(
-                    self._template,
-                    data=data,
-                    axes={
-                        **self._template.axes,
-                        "time": replace(
-                            self._template.axes["time"],
-                            **t_kwargs,
-                        ),
-                    },
-                )
+        result = self()
+        if result is None:
+            raise StopIteration
         return result
 
 
-class XDFMultiAxArrIterator(XDFIterator):
-    def __init__(self, *args, force_single_sample: set = set(), **kwargs):
-        """
-        This Iterator loads multiple streams and yields a :obj:`AxisArray` object per iteration,
-        but the stream source might different between chunks.
+class XDFMultiAxArrIterator(
+    _XDFProducerBase,
+    BaseStatefulProducer[XDFMultiIteratorSettings, AxisArray, XDFMultiIteratorState],
+):
+    """Loads multiple streams and produces one :obj:`AxisArray` per iteration.
 
-        Args:
-            *args:
-            force_single_sample: Use this to identify irregular-rate streams that might conceivably have more than one
-                event within the defined chunk_dur, for which :obj:`AxisArray` cannot represent timestamps properly.
-            **kwargs:
-        """
-        super().__init__(*args, **kwargs)
-        self._force_single_sample = force_single_sample
-        stream_names = [_["info"]["name"][0] for _ in self._streams]
+    Which stream a given message came from varies; read ``.key``. Returns
+    ``None`` when a chunk held nothing for any stream, and raises
+    ``StopIteration`` only once the file is done.
 
-        # Create template messages for each stream
-        self._templates = {}
-        for stream_name, stream_meta in self._metadata.items():
-            stream = self._streams[stream_names.index(stream_name)]
-            labels = labels_from_strm(stream)
-            fs = stream_meta["nominal_srate"]
-            time_ax = (
-                AxisArray.TimeAxis(fs=fs, offset=0.0)
-                if fs
-                else AxisArray.CoordinateAxis(data=np.array([]), dims=["time"], unit="s")
+    ``force_single_sample`` names irregular-rate streams that may carry more than
+    one event within ``chunk_dur``, which :obj:`AxisArray` cannot represent as a
+    single message with correct timestamps; those are split one event per
+    message.
+    """
+
+    @property
+    def exhausted(self) -> bool:
+        reader = self._state.reader
+        if reader is None:
+            return False
+        return reader.exhausted and self._state.pubqueue.empty()
+
+    def _reset_state(self) -> None:
+        reader = self._build_reader(self.settings.select)
+        stream_names = [_["info"]["name"][0] for _ in reader._streams]
+        self._state.reader = reader
+        self._state.pubqueue = queue.SimpleQueue()
+        self._state.templates = {
+            name: _build_template(
+                reader._streams[stream_names.index(name)],
+                name=name,
+                n_ch=meta["channel_count"],
+                fs=meta["nominal_srate"],
             )
-            self._templates[stream_name] = AxisArray(
-                data=np.zeros(
-                    (0, stream_meta["channel_count"]), dtype=stream["time_series"].dtype
-                ),
-                dims=["time", "ch"],
-                axes={
-                    "time": time_ax,
-                    "ch": AxisArray.CoordinateAxis(data=np.array(labels), dims=["ch"]),
-                },
-                key=stream_name,
-            )
-        self._pubqueue: queue.SimpleQueue[AxisArray] = queue.SimpleQueue()
+            for name, meta in reader.stream_meta.items()
+        }
 
-    def __next__(self) -> AxisArray | None:
-        if self._pubqueue.empty():
-            chunk_dict = super().__next__()
-            for k, template in self._templates.items():
-                if k in chunk_dict and len(chunk_dict[k][1]) > 0:
-                    data, tvec = chunk_dict[k]
-                    if k in self._force_single_sample:
-                        if isinstance(template.axes["time"], AxisArray.CoordinateAxis):
-                            t_kwargs = {"data": np.array([])}
-                        else:
-                            t_kwargs = {"offset": 0.0}
-                        for ix, _t in enumerate(tvec):
-                            if "data" in t_kwargs:
-                                t_kwargs["data"] = np.array([_t])
-                            else:
-                                t_kwargs["offset"] = _t
-                            self._pubqueue.put_nowait(
-                                replace(
-                                    template,
-                                    data=data[ix : ix + 1],
-                                    axes={
-                                        **template.axes,
-                                        "time": replace(
-                                            template.axes["time"], **t_kwargs
-                                        ),
-                                    },
-                                )
-                            )
-                    else:
-                        if isinstance(template.axes["time"], AxisArray.CoordinateAxis):
-                            t_kwargs = {"data": tvec if len(tvec) else np.array([])}
-                        else:
-                            t_kwargs = {
-                                "offset": tvec[0] if len(tvec) else self._last_time
-                            }
-                        self._pubqueue.put_nowait(
-                            replace(
-                                template,
-                                data=data,
-                                axes={
-                                    **template.axes,
-                                    "time": replace(
-                                        template.axes["time"],
-                                        **t_kwargs,
-                                    ),
-                                },
-                            )
-                        )
+    def _enqueue_chunk(self, chunk_dict: dict) -> None:
+        reader = self._state.reader
+        for name, template in self._state.templates.items():
+            if name not in chunk_dict or len(chunk_dict[name][1]) == 0:
+                continue
+            data, tvec = chunk_dict[name]
+            if name in self.settings.force_single_sample:
+                for ix, stamp in enumerate(tvec):
+                    self._state.pubqueue.put_nowait(_with_time(template, data[ix : ix + 1], np.array([stamp]), stamp))
+            else:
+                self._state.pubqueue.put_nowait(_with_time(template, data, tvec, reader._last_time))
+
+    async def _produce(self) -> AxisArray | None:
+        if self._state.pubqueue.empty():
+            try:
+                self._enqueue_chunk(next(self._state.reader))
+            except StopIteration:
+                return None
         try:
-            return self._pubqueue.get_nowait()
+            return self._state.pubqueue.get_nowait()
         except queue.Empty:
             return None
+
+    def __next__(self) -> AxisArray | None:
+        if self.exhausted:
+            raise StopIteration
+        return self()
