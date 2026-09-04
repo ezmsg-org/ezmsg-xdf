@@ -10,6 +10,7 @@ dynamic = ["version"]
 dependencies = [
     # 3.10.0b2 for AxisArray.chunk_dim and CoordinateAxis.fingerprint.
     "ezmsg>=3.10.0b2",
+    "ezmsg-baseproc>=1.11.0",
     "numpy>=2.0.2",
     "pyxdf>=1.16.8",
 ]
@@ -63,7 +64,7 @@ select = ["E", "F", "I", "W"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ezmsg.xdf"]
-known-third-party = ["ezmsg"]
+known-third-party = ["ezmsg", "ezmsg.baseproc"]
 
 [tool.uv.sources]
 # Uncomment to use development version of ezmsg from git
