@@ -62,7 +62,7 @@ class XDFIteratorSettings(ez.Settings):
     Note, however, that this will terminate the pipeline even if the data published by this unit are still in transit,
     which will lead to the pipeline output being truncated before it has finished processing the stream.
     `self_terminating` should only be used when it is not important that the pipeline finish processing data, such
-    as during prototyping and testing. 
+    as during prototyping and testing.
     """
 
 
@@ -102,9 +102,7 @@ class XDFIteratorUnit(ez.Unit):
                 else:
                     await asyncio.sleep(0)
         except StopIteration:
-            ez.logger.debug(
-                f"File ({self.SETTINGS.filepath} :: {self.SETTINGS.select}) exhausted."
-            )
+            ez.logger.debug(f"File ({self.SETTINGS.filepath} :: {self.SETTINGS.select}) exhausted.")
             if self.SETTINGS.self_terminating:
                 raise ez.NormalTermination
             yield self.OUTPUT_TERM, True
@@ -152,9 +150,7 @@ class XDFMultiIteratorUnit(ez.Unit):
                 else:
                     await asyncio.sleep(0)
         except StopIteration:
-            ez.logger.debug(
-                f"File ({self.SETTINGS.filepath} :: {self.SETTINGS.select}) exhausted."
-            )
+            ez.logger.debug(f"File ({self.SETTINGS.filepath} :: {self.SETTINGS.select}) exhausted.")
             if self.SETTINGS.self_terminating:
                 raise ez.NormalTermination
             yield self.OUTPUT_TERM, True
