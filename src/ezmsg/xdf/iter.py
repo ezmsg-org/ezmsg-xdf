@@ -229,7 +229,7 @@ def _build_template(stream: dict, name: str, n_ch: int, fs: float) -> AxisArray:
         key=name,
         # Messages accumulate along `time`, whether the stream is regular or
         # carries per-sample timestamps; `ch` describes the stream itself.
-        chunk_dim="time",
+        stream_dim="time",
     )
 
 
