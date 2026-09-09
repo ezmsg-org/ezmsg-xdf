@@ -109,7 +109,7 @@ class TestTheMultiStreamIterator:
 class TestMessagesArriveReadyForConsumers:
     """Two things only the source can supply, both set once per stream.
 
-    ``chunk_dim`` names the dimension messages accumulate along -- the one whose
+    ``stream_dim`` names the dimension messages accumulate along -- the one whose
     length is just however much of the file this chunk covered, and which a
     consumer must leave out of the state it caches against the stream's
     configuration. ``fingerprint`` is the channel axis's content digest, cached
@@ -117,13 +117,13 @@ class TestMessagesArriveReadyForConsumers:
     consumer in every process from recomputing it on every message.
     """
 
-    def test_the_single_stream_iterator_declares_its_chunk_dim(self, test_xdf_path):
-        assert all(m.chunk_dim == "time" for m in eeg_messages(test_xdf_path))
+    def test_the_single_stream_iterator_declares_its_stream_dim(self, test_xdf_path):
+        assert all(m.stream_dim == "time" for m in eeg_messages(test_xdf_path))
 
     def test_the_multi_stream_iterator_declares_it_for_every_stream(self, test_xdf_path):
         it = XDFMultiAxArrIterator(filepath=test_xdf_path, chunk_dur=1.0)
-        undeclared = sorted({m.key for m in it if m is not None and m.chunk_dim != "time"})
-        assert not undeclared, f"streams not declaring chunk_dim='time': {undeclared}"
+        undeclared = sorted({m.key for m in it if m is not None and m.stream_dim != "time"})
+        assert not undeclared, f"streams not declaring stream_dim='time': {undeclared}"
 
     def test_the_channel_axis_is_primed(self, test_xdf_path):
         msg = eeg_messages(test_xdf_path)[0]
@@ -143,7 +143,7 @@ class TestMessagesArriveReadyForConsumers:
 
     def test_the_chunk_axis_is_left_cold(self, test_xdf_path):
         """Digesting per-message timestamps would be pure cost: no consumer reads
-        the chunk axis's fingerprint."""
+        the stream axis's fingerprint."""
         it = XDFMultiAxArrIterator(filepath=test_xdf_path, chunk_dur=1.0)
         markers = [m for m in it if m is not None and m.key == MARKER_STREAM.name]
         assert markers, "no marker messages"
@@ -152,7 +152,7 @@ class TestMessagesArriveReadyForConsumers:
     def test_it_all_survives_the_transport(self, test_xdf_path):
         msg = eeg_messages(test_xdf_path)[0]
         landed = pickle.loads(pickle.dumps(msg))
-        assert landed.chunk_dim == "time"
+        assert landed.stream_dim == "time"
         assert "_fingerprint" in landed.axes["ch"].__dict__
         assert landed.axes["ch"].__dict__["_fingerprint"] == msg.axes["ch"].fingerprint
 
@@ -292,7 +292,7 @@ class TestTheUnitsInAGraph:
         )
         assert msgs, "no messages published"
         assert sum(m.data.shape[0] for m in msgs) == EEG_STREAM.n_samples
-        assert all(m.chunk_dim == "time" for m in msgs)
+        assert all(m.stream_dim == "time" for m in msgs)
         assert all("_fingerprint" in m.axes["ch"].__dict__ for m in msgs)
 
     def test_the_multi_stream_unit_publishes_both_streams(self, test_xdf_path):
@@ -303,4 +303,4 @@ class TestTheUnitsInAGraph:
         assert {m.key for m in msgs} == {EEG_STREAM.name, MARKER_STREAM.name}
         eeg = [m for m in msgs if m.key == EEG_STREAM.name]
         assert sum(m.data.shape[0] for m in eeg) == EEG_STREAM.n_samples
-        assert all(m.chunk_dim == "time" for m in msgs)
+        assert all(m.stream_dim == "time" for m in msgs)

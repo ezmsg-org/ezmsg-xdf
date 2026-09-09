@@ -8,8 +8,8 @@ authors = [
 requires-python = ">=3.10.15"
 dynamic = ["version"]
 dependencies = [
-    # 3.10.0b2 for AxisArray.chunk_dim and CoordinateAxis.fingerprint.
-    "ezmsg>=3.10.0b2",
+    # 3.10.0b3 for AxisArray.stream_dim and CoordinateAxis.fingerprint.
+    "ezmsg>=3.10.0b3",
     "ezmsg-baseproc>=1.11.0",
     "numpy>=2.0.2",
     "pyxdf>=1.16.8",
