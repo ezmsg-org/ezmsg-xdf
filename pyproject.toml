@@ -15,6 +15,12 @@ dependencies = [
     "pyxdf>=1.16.8",
 ]
 
+
+[project.entry-points."ezmsg.components"]
+"xdf.XDFIteratorUnit" = "ezmsg.xdf.source:XDFIteratorUnit"
+"xdf.XDFMultiIteratorUnit" = "ezmsg.xdf.source:XDFMultiIteratorUnit"
+
+
 [dependency-groups]
 dev = [
     {include-group = "lint"},
