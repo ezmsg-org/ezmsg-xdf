@@ -161,6 +161,8 @@ class StreamSpec(typing.NamedTuple):
     t0: float = 10.0
     """Nonzero on purpose: a fixture starting at 0 cannot tell a reader that
     honours ``rezero`` apart from one that ignores it."""
+    pause: tuple[int, float] | None = None
+    """``(sample index, seconds)``: the sender stops for that long just before that sample."""
 
 
 def _values_for(spec: StreamSpec, rng: np.random.Generator) -> np.ndarray:
@@ -178,7 +180,10 @@ def _values_for(spec: StreamSpec, rng: np.random.Generator) -> np.ndarray:
 
 def _stamps_for(spec: StreamSpec, rng: np.random.Generator) -> np.ndarray:
     if spec.srate > 0:
-        return spec.t0 + np.arange(spec.n_samples) / spec.srate
+        stamps = spec.t0 + np.arange(spec.n_samples) / spec.srate
+        if spec.pause is not None:
+            stamps[spec.pause[0] :] += spec.pause[1]
+        return stamps
     # Irregular: monotonic but unevenly spaced, which is the whole point of the
     # format's per-sample timestamps.
     gaps = rng.uniform(0.05, 0.25, size=spec.n_samples)
