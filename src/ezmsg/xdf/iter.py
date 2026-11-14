@@ -25,6 +25,8 @@ class XDFIterator:
         start_time: float | None = None,
         stop_time: float | None = None,
         rezero: bool = True,
+        jitter_break_threshold_seconds: float = 1.0,
+        jitter_break_threshold_samples: int = 500,
     ):
         """
         An Iterator that yields chunks from an XDF.
@@ -54,6 +56,10 @@ class XDFIterator:
                 rezero the timestamps to start at t=0.0 for simplicity. However, there may be rare circumstances where
                 one wants to compare the timestamps produced by ezmsg to timestamps produced by another XDF analysis
                 tool that does not rezero. In that case, set rezero=False.
+            jitter_break_threshold_seconds: Passed to ``pyxdf.load_xdf``. An interruption in a regularly sampled
+                stream longer than both this and ``jitter_break_threshold_samples`` sample periods splits the
+                stream into segments; see :meth:`split_segments`.
+            jitter_break_threshold_samples: Passed to ``pyxdf.load_xdf``, as above.
         """
         if isinstance(filepath, str):
             filepath = Path(filepath).expanduser()
@@ -61,6 +67,8 @@ class XDFIterator:
         self._select = select
         self._chunk_dur = chunk_dur
         self._rezero = rezero
+        self._break_thresholds = (jitter_break_threshold_seconds, jitter_break_threshold_samples)
+        self._segment_starts: dict[str, npt.NDArray] = {}
         self._n_chunks = 0
         self._t0 = 0.0
         self._chunk_ix = 0
@@ -84,8 +92,11 @@ class XDFIterator:
         self._streams, fileheader = pyxdf.load_xdf(
             self._filepath,
             select_streams=None if (self._select is None or self._rezero) else [{"name": _} for _ in self._select],
+            jitter_break_threshold_seconds=self._break_thresholds[0],
+            jitter_break_threshold_samples=self._break_thresholds[1],
         )
         self._metadata = {}
+        self._segment_starts = {}
         self._file_read_s = 0
         self._prev_file_read_s = 0
         xdf_t0 = np.inf
@@ -111,10 +122,16 @@ class XDFIterator:
                 xdf_t0 = min(xdf_t0, tvec[0])
                 xdf_tmax = max(xdf_tmax, tvec[-1])
 
+            # When each segment pyxdf found after the first begins. Kept as times, not as the
+            # sample indices pyxdf gives, so that trimming to a time range cannot shift them.
+            firsts = [first for first, _ in (info.get("segments") or [])[1:] if first < len(tvec)]
+            self._segment_starts[new_meta["name"]] = np.asarray(tvec[firsts], dtype=float)
+
         # Permanently modify streams' time stamps
         if self._rezero:
             for strm in self._streams:
                 strm["time_stamps"] = strm["time_stamps"] - xdf_t0
+            self._segment_starts = {k: v - xdf_t0 for k, v in self._segment_starts.items()}
             xdf_tmax -= xdf_t0
             xdf_t0 = 0
 
@@ -129,7 +146,7 @@ class XDFIterator:
                     b_keep = np.logical_and(b_keep, tvec <= self._time_range[1])
                 if np.any(~b_keep):
                     strm["time_stamps"] = tvec[b_keep]
-                    strm["timeseries"] = strm["timeseries"][b_keep]
+                    strm["time_series"] = strm["time_series"][b_keep]
 
         # Recalculate tmax
         xdf_dur = 0
@@ -162,6 +179,30 @@ class XDFIterator:
     @property
     def n_chunks(self) -> int:
         return self._n_chunks
+
+    @property
+    def n_segments(self) -> int:
+        """The largest number of segments any one stream has."""
+        return 1 + max((len(v) for v in self._segment_starts.values()), default=0)
+
+    def split_segments(
+        self, name: str, data: npt.NDArray, tvec: npt.NDArray
+    ) -> list[tuple[npt.NDArray, npt.NDArray, int]]:
+        """Split one stream's chunk where the recording was interrupted.
+
+        pyxdf marks an interruption in a regularly sampled stream (see the
+        ``jitter_break_threshold_*`` arguments) and removes jitter from each run of samples
+        between interruptions separately. Returns ``(data, tvec, segment)`` for each such run
+        the chunk touches, in order, where ``segment`` counts the stream's runs from 0. A
+        chunk with no interruption in it comes back whole.
+        """
+        starts = self._segment_starts.get(name)
+        if starts is None or len(starts) == 0 or len(tvec) == 0:
+            return [(data, tvec, 0)]
+        seg = np.searchsorted(starts, tvec, side="right")
+        cuts = np.flatnonzero(np.diff(seg)) + 1
+        bounds = [0, *cuts.tolist(), len(tvec)]
+        return [(data[a:b], tvec[a:b], int(seg[a])) for a, b in zip(bounds[:-1], bounds[1:])]
 
     @property
     def exhausted(self) -> bool:
@@ -233,7 +274,9 @@ def _build_template(stream: dict, name: str, n_ch: int, fs: float) -> AxisArray:
     )
 
 
-def _with_time(template: AxisArray, data: npt.NDArray, tvec: npt.NDArray, fallback_t: float) -> AxisArray:
+def _with_time(
+    template: AxisArray, data: npt.NDArray, tvec: npt.NDArray, fallback_t: float, segment: int = 0
+) -> AxisArray:
     """A chunk message: the template's data replaced, and its time axis advanced.
 
     An irregular stream carries every timestamp; a regular one carries only where
@@ -248,6 +291,7 @@ def _with_time(template: AxisArray, data: npt.NDArray, tvec: npt.NDArray, fallba
         template,
         data=data,
         axes={**template.axes, "time": replace(time_ax, **t_kwargs)},
+        segment=segment,
     )
 
 
@@ -265,6 +309,14 @@ class XDFIteratorSettings(ez.Settings):
     start_time: float | None = None
     stop_time: float | None = None
     rezero: bool = True
+    jitter_break_threshold_seconds: float = 1.0
+    """An interruption in a regularly sampled stream longer than both this and
+    ``jitter_break_threshold_samples`` sample periods starts a new
+    :attr:`~ezmsg.util.messages.axisarray.AxisArray.segment`, on which stateful processors
+    downstream reset. These are ``pyxdf.load_xdf``'s own thresholds and defaults: pyxdf finds
+    the interruptions and removes timestamp jitter from each side separately."""
+    jitter_break_threshold_samples: int = 500
+    """See ``jitter_break_threshold_seconds``."""
     playback_rate: float | None = None
     self_terminating: bool = False
     """
@@ -285,6 +337,8 @@ class XDFMultiIteratorSettings(XDFIteratorSettings):
 class XDFIteratorState:
     reader: XDFIterator | None = None
     template: AxisArray | None = None
+    pending: list | None = None
+    """Messages cut from the last chunk and not yet produced."""
 
 
 @processor_state
@@ -324,7 +378,18 @@ class _XDFProducerBase:
             start_time=self.settings.start_time,
             stop_time=self.settings.stop_time,
             rezero=self.settings.rezero,
+            jitter_break_threshold_seconds=self.settings.jitter_break_threshold_seconds,
+            jitter_break_threshold_samples=self.settings.jitter_break_threshold_samples,
         )
+
+    def _first_segment(self, reader: XDFIterator) -> int:
+        """The output ``segment`` of each stream's first run in a newly opened file.
+
+        Reopening the file continues nothing, so numbering carries on from the last pass.
+        """
+        first = getattr(self, "_next_segment", 0)
+        self._next_segment = first + reader.n_segments
+        return first
 
 
 class XDFAxisArrayIterator(
@@ -339,12 +404,14 @@ class XDFAxisArrayIterator(
     @property
     def exhausted(self) -> bool:
         reader = self._state.reader
-        return reader is not None and reader.exhausted
+        return reader is not None and reader.exhausted and not self._state.pending
 
     def _reset_state(self) -> None:
         reader = self._build_reader({self.settings.select})
         meta = reader.stream_meta[self.settings.select]
         self._state.reader = reader
+        self._state.pending = []
+        self._first = self._first_segment(reader)
         self._state.template = _build_template(
             reader._streams[0],
             name=reader._streams[0]["info"]["name"][0],
@@ -354,6 +421,8 @@ class XDFAxisArrayIterator(
 
     async def _produce(self) -> AxisArray | None:
         reader = self._state.reader
+        if self._state.pending:
+            return self._state.pending.pop(0)
         try:
             chunk_dict = next(reader)
         except StopIteration:
@@ -361,7 +430,11 @@ class XDFAxisArrayIterator(
         data, tvec = chunk_dict.get(self.settings.select, (None, None))
         if data is None:
             return None
-        return _with_time(self._state.template, data, tvec, reader._last_time)
+        self._state.pending = [
+            _with_time(self._state.template, d, t, reader._last_time, self._first + seg)
+            for d, t, seg in reader.split_segments(self.settings.select, data, tvec)
+        ]
+        return self._state.pending.pop(0)
 
     def __next__(self) -> AxisArray:
         result = self()
@@ -398,6 +471,7 @@ class XDFMultiAxArrIterator(
         stream_names = [_["info"]["name"][0] for _ in reader._streams]
         self._state.reader = reader
         self._state.pubqueue = queue.SimpleQueue()
+        self._first = self._first_segment(reader)
         self._state.templates = {
             name: _build_template(
                 reader._streams[stream_names.index(name)],
@@ -414,11 +488,15 @@ class XDFMultiAxArrIterator(
             if name not in chunk_dict or len(chunk_dict[name][1]) == 0:
                 continue
             data, tvec = chunk_dict[name]
-            if name in self.settings.force_single_sample:
-                for ix, stamp in enumerate(tvec):
-                    self._state.pubqueue.put_nowait(_with_time(template, data[ix : ix + 1], np.array([stamp]), stamp))
-            else:
-                self._state.pubqueue.put_nowait(_with_time(template, data, tvec, reader._last_time))
+            for data, tvec, seg in reader.split_segments(name, data, tvec):
+                segment = self._first + seg
+                if name in self.settings.force_single_sample:
+                    for ix, stamp in enumerate(tvec):
+                        self._state.pubqueue.put_nowait(
+                            _with_time(template, data[ix : ix + 1], np.array([stamp]), stamp, segment)
+                        )
+                else:
+                    self._state.pubqueue.put_nowait(_with_time(template, data, tvec, reader._last_time, segment))
 
     async def _produce(self) -> AxisArray | None:
         if self._state.pubqueue.empty():
