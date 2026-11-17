@@ -99,7 +99,7 @@ class TestTheMultiStreamIterator:
         split = [
             m
             for m in self._messages(test_xdf_path, force_single_sample={MARKER_STREAM.name})
-            if m.key == MARKER_STREAM.name
+            if m.key == MARKER_STREAM.name and m.data.shape[0]  # not the end-of-stream marker
         ]
         assert len(split) == MARKER_STREAM.n_samples
         assert len(split) > len(batched)

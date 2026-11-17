@@ -9,9 +9,10 @@ import ezmsg.core as ez
 import numpy as np
 import numpy.typing as npt
 import pyxdf
+from ezmsg.baseproc import end_of_stream
 from ezmsg.baseproc.protocols import processor_state
 from ezmsg.baseproc.stateful import BaseStatefulProducer
-from ezmsg.util.messages.axisarray import AxisArray
+from ezmsg.util.messages.axisarray import AxisArray, compute_config_id
 from ezmsg.util.messages.util import replace
 
 
@@ -69,6 +70,7 @@ class XDFIterator:
         self._rezero = rezero
         self._break_thresholds = (jitter_break_threshold_seconds, jitter_break_threshold_samples)
         self._segment_starts: dict[str, npt.NDArray] = {}
+        self._stream_ends: dict[str, float] = {}
         self._n_chunks = 0
         self._t0 = 0.0
         self._chunk_ix = 0
@@ -97,6 +99,7 @@ class XDFIterator:
         )
         self._metadata = {}
         self._segment_starts = {}
+        self._stream_ends = {}
         self._file_read_s = 0
         self._prev_file_read_s = 0
         xdf_t0 = np.inf
@@ -147,6 +150,15 @@ class XDFIterator:
                 if np.any(~b_keep):
                     strm["time_stamps"] = tvec[b_keep]
                     strm["time_series"] = strm["time_series"][b_keep]
+
+        # Each stream's last sample (after trimming), and only the gaps after its first: the first
+        # sample kept is segment 0 even when a time range starts it after a pause.
+        for strm in self._streams:
+            tvec = strm["time_stamps"]
+            name = strm["info"]["name"][0]
+            if len(tvec) > 0:
+                self._segment_starts[name] = self._segment_starts[name][self._segment_starts[name] > tvec[0]]
+                self._stream_ends[name] = tvec[-1]
 
         # Recalculate tmax
         xdf_dur = 0
@@ -203,6 +215,10 @@ class XDFIterator:
         cuts = np.flatnonzero(np.diff(seg)) + 1
         bounds = [0, *cuts.tolist(), len(tvec)]
         return [(data[a:b], tvec[a:b], int(seg[a])) for a, b in zip(bounds[:-1], bounds[1:])]
+
+    def ends_stream(self, name: str, tvec: npt.NDArray) -> bool:
+        """Whether a run from :meth:`split_segments` holds the stream's last sample."""
+        return len(tvec) > 0 and tvec[-1] >= self._stream_ends[name]
 
     @property
     def exhausted(self) -> bool:
@@ -263,7 +279,7 @@ def _build_template(stream: dict, name: str, n_ch: int, fs: float) -> AxisArray:
     # unpickling builds a new axis object per message, by the first consumer in
     # every other process, on every message.
     ch_ax.fingerprint
-    return AxisArray(
+    template = AxisArray(
         data=np.zeros((0, n_ch), dtype=stream["time_series"].dtype),
         dims=["time", "ch"],
         axes={"time": time_ax, "ch": ch_ax},
@@ -272,6 +288,8 @@ def _build_template(stream: dict, name: str, n_ch: int, fs: float) -> AxisArray:
         # carries per-sample timestamps; `ch` describes the stream itself.
         stream_dim="time",
     )
+    template.config_id = compute_config_id(template)
+    return template
 
 
 def _with_time(
@@ -385,10 +403,12 @@ class _XDFProducerBase:
     def _first_segment(self, reader: XDFIterator) -> int:
         """The output ``segment`` of each stream's first run in a newly opened file.
 
-        Reopening the file continues nothing, so numbering carries on from the last pass.
+        Run ``k`` is ``first + k``; a gap emits no marker. The end-of-stream marker after a stream's
+        last run is one more. Reopening the file continues nothing, so numbering carries on past
+        the last pass's numbers.
         """
         first = getattr(self, "_next_segment", 0)
-        self._next_segment = first + reader.n_segments
+        self._next_segment = first + reader.n_segments + 1  # + 1: the end markers
         return first
 
 
@@ -412,6 +432,7 @@ class XDFAxisArrayIterator(
         self._state.reader = reader
         self._state.pending = []
         self._first = self._first_segment(reader)
+        self._segment = self._first  # of the last message produced
         self._state.template = _build_template(
             reader._streams[0],
             name=reader._streams[0]["info"]["name"][0],
@@ -430,11 +451,15 @@ class XDFAxisArrayIterator(
         data, tvec = chunk_dict.get(self.settings.select, (None, None))
         if data is None:
             return None
-        self._state.pending = [
-            _with_time(self._state.template, d, t, reader._last_time, self._first + seg)
-            for d, t, seg in reader.split_segments(self.settings.select, data, tvec)
-        ]
-        return self._state.pending.pop(0)
+        pending = self._state.pending
+        for d, t, seg in reader.split_segments(self.settings.select, data, tvec):
+            # A chunk with no samples continues whatever came before it, an end-of-stream marker included.
+            segment = self._first + seg if len(t) else self._segment
+            pending.append(_with_time(self._state.template, d, t, reader._last_time, segment))
+            if reader.ends_stream(self.settings.select, t):
+                pending.append(end_of_stream(pending[-1]))
+        self._segment = pending[-1].segment
+        return pending.pop(0)
 
     def __next__(self) -> AxisArray:
         result = self()
@@ -491,12 +516,16 @@ class XDFMultiAxArrIterator(
             for data, tvec, seg in reader.split_segments(name, data, tvec):
                 segment = self._first + seg
                 if name in self.settings.force_single_sample:
-                    for ix, stamp in enumerate(tvec):
-                        self._state.pubqueue.put_nowait(
-                            _with_time(template, data[ix : ix + 1], np.array([stamp]), stamp, segment)
-                        )
+                    msgs = [
+                        _with_time(template, data[ix : ix + 1], np.array([stamp]), stamp, segment)
+                        for ix, stamp in enumerate(tvec)
+                    ]
                 else:
-                    self._state.pubqueue.put_nowait(_with_time(template, data, tvec, reader._last_time, segment))
+                    msgs = [_with_time(template, data, tvec, reader._last_time, segment)]
+                if reader.ends_stream(name, tvec):
+                    msgs.append(end_of_stream(msgs[-1]))
+                for msg in msgs:
+                    self._state.pubqueue.put_nowait(msg)
 
     async def _produce(self) -> AxisArray | None:
         if self._state.pubqueue.empty():

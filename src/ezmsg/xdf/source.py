@@ -104,11 +104,14 @@ class XDFIteratorUnit(
 
     @ez.publisher(OUTPUT_SIGNAL)
     async def produce(self) -> typing.AsyncGenerator:
+        segment = None
         while not self.producer.exhausted:
             if self._clock is not None:
                 await self._clock.astep()
             msg = await self.producer.__acall__()
-            if msg is not None and msg.data.size > 0:
+            # An empty chunk carries nothing, but an empty end_of_stream marker starts a new segment.
+            if msg is not None and (msg.data.size > 0 or segment not in (None, msg.segment)):
+                segment = msg.segment
                 yield self.OUTPUT_SIGNAL, msg
             else:
                 await asyncio.sleep(0)
